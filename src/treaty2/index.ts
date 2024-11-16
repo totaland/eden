@@ -3,6 +3,7 @@
 /* eslint-disable prefer-const */
 import type { Elysia } from 'elysia'
 import type { Treaty } from './types'
+import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse } from 'axios'
 
 import { EdenFetchError } from '../errors'
 import { EdenWS } from './ws'
@@ -64,7 +65,7 @@ const createNewFile = (v: File) =>
 const processHeaders = (
 	h: Treaty.Config['headers'],
 	path: string,
-	options: RequestInit = {},
+	options: AxiosRequestConfig = {},
 	headers: Record<string, string> = {}
 ): Record<string, string> => {
 	if (Array.isArray(h)) {
@@ -112,25 +113,24 @@ const processHeaders = (
 	}
 }
 
-export async function* streamResponse(response: Response) {
-	const body = response.body
+export async function* streamResponse(response: AxiosResponse) {
+	const body = response.data
 
 	if (!body) return
 
-	const reader = body.getReader()
-	const decoder = new TextDecoder()
+	if (typeof body === 'string') {
+		yield parseStringifiedValue(body)
+		return
+	}
 
-	try {
-		while (true) {
-			const { done, value } = await reader.read()
-			if (done) break
-
-			const data = decoder.decode(value)
-
-			yield parseStringifiedValue(data)
+	// Handle streaming response if needed
+	if (body.pipe) {
+		const stream = body
+		const chunks: Buffer[] = []
+		
+		for await (const chunk of stream) {
+			yield parseStringifiedValue(chunk.toString())
 		}
-	} finally {
-		reader.releaseLock()
 	}
 }
 
@@ -161,11 +161,11 @@ const createProxy = (
 				const path = '/' + methodPaths.join('/')
 
 				let {
-					fetcher = fetch,
+					axiosInstance = axios.create(),
 					headers,
 					onRequest,
 					onResponse,
-					fetch: conf
+					axios: conf
 				} = config
 
 				const isGetOrHead =
@@ -227,66 +227,63 @@ const createProxy = (
 				}
 
 				return (async () => {
-					let fetchInit = {
+					let axiosConfig: AxiosRequestConfig = {
 						method: method?.toUpperCase(),
-						body,
+						data: body,
 						...conf,
 						headers
-					} satisfies FetchRequestInit
+					}
 
-					fetchInit.headers = {
+					axiosConfig.headers = {
 						...headers,
 						...processHeaders(
-							// For GET and HEAD, options is moved to body (1st param)
 							isGetOrHead ? body?.headers : options?.headers,
 							path,
-							fetchInit
+							axiosConfig
 						)
 					}
 
 					const fetchOpts =
 						isGetOrHead && typeof body === 'object'
-							? body.fetch
-							: options?.fetch
+							? body.axios
+							: options?.axios
 
-					fetchInit = {
-						...fetchInit,
+					axiosConfig = {
+						...axiosConfig,
 						...fetchOpts
 					}
 
-					if (isGetOrHead) delete fetchInit.body
+					if (isGetOrHead) delete axiosConfig.data
 
 					if (onRequest) {
 						if (!Array.isArray(onRequest)) onRequest = [onRequest]
 
 						for (const value of onRequest) {
-							const temp = await value(path, fetchInit)
+							const temp = await value(path, axiosConfig)
 
 							if (typeof temp === 'object')
-								fetchInit = {
-									...fetchInit,
+								axiosConfig = {
+									...axiosConfig,
 									...temp,
 									headers: {
-										...fetchInit.headers,
+										...axiosConfig.headers,
 										...processHeaders(
 											temp.headers,
 											path,
-											fetchInit
+											axiosConfig
 										)
 									}
 								}
 						}
 					}
 
-					// ? Duplicate because end-user might add a body in onRequest
-					if (isGetOrHead) delete fetchInit.body
+					if (isGetOrHead) delete axiosConfig.data
 
 					if (hasFile(body)) {
 						const formData = new FormData()
 
-						// FormData is 1 level deep
 						for (const [key, field] of Object.entries(
-							fetchInit.body
+							axiosConfig.data
 						)) {
 							if (isServer) {
 								formData.append(key, field as any)
@@ -331,52 +328,69 @@ const createProxy = (
 							formData.append(key, field as string)
 						}
 
-						// We don't do this because we need to let the browser set the content type with the correct boundary
-						// fetchInit.headers['content-type'] = 'multipart/form-data'
-						fetchInit.body = formData
+						axiosConfig.data = formData
+						axiosConfig.headers = {
+							...axiosConfig.headers,
+							'Content-Type': 'multipart/form-data'
+						}
 					} else if (typeof body === 'object') {
-						;(fetchInit.headers as Record<string, string>)[
-							'content-type'
-						] = 'application/json'
-
-						fetchInit.body = JSON.stringify(body)
+						axiosConfig.headers = {
+							...axiosConfig.headers,
+							'Content-Type': 'application/json'
+						}
+						axiosConfig.data = body
 					} else if (body !== undefined && body !== null) {
-						;(fetchInit.headers as Record<string, string>)[
-							'content-type'
-						] = 'text/plain'
+						axiosConfig.headers = {
+							...axiosConfig.headers,
+							'Content-Type': 'text/plain'
+						}
+						axiosConfig.data = body
 					}
 
-					if (isGetOrHead) delete fetchInit.body
+					if (isGetOrHead) delete axiosConfig.data
 
-					if (onRequest) {
-						if (!Array.isArray(onRequest)) onRequest = [onRequest]
-
-						for (const value of onRequest) {
-							const temp = await value(path, fetchInit)
-
-							if (typeof temp === 'object')
-								fetchInit = {
-									...fetchInit,
-									...temp,
-									headers: {
-										...fetchInit.headers,
-										...processHeaders(
-											temp.headers,
-											path,
-											fetchInit
-										)
-									} as Record<string, string>
-								}
+					const url = domain + path + q
+					let response: AxiosResponse
+					
+					try {
+						if (elysia) {
+							// Handle Elysia instance case
+							const elyResponse = await elysia.handle(new Request(url, {
+								method: axiosConfig.method,
+								headers: axiosConfig.headers as HeadersInit,
+								body: axiosConfig.data ? JSON.stringify(axiosConfig.data) : undefined
+							}))
+							
+							// Convert Response to AxiosResponse format
+							const responseHeaders: Record<string, string> = {};
+							elyResponse.headers.forEach((value, key) => {
+								responseHeaders[key] = value;
+							});
+							
+							response = {
+								data: await elyResponse.json(),
+								status: elyResponse.status,
+								statusText: elyResponse.statusText,
+								headers: responseHeaders,
+								config: axiosConfig as any, // Force type to avoid circular reference
+								request: undefined
+							}
+						} else {
+							response = await axiosInstance({
+								url,
+								...axiosConfig,
+								headers: axiosConfig.headers || {}
+							})
+						}
+					} catch (error) {
+						if (axios.isAxiosError(error) && error.response) {
+							response = error.response
+						} else {
+							throw error
 						}
 					}
 
-					const url = domain + path + q
-					const response = await (elysia?.handle(
-						new Request(url, fetchInit)
-					) ?? fetcher!(url, fetchInit))
-
-					// @ts-ignore
-					let data = null
+					let data: AsyncGenerator<any, void, unknown> | ArrayBuffer | FormData | Record<string, any> | string | null = null
 					let error = null
 
 					if (onResponse) {
@@ -385,7 +399,7 @@ const createProxy = (
 
 						for (const value of onResponse)
 							try {
-								const temp = await value(response.clone())
+								const temp = await value(response)
 
 								if (temp !== undefined && temp !== null) {
 									data = temp
@@ -409,35 +423,35 @@ const createProxy = (
 						}
 					}
 
-					switch (
-						response.headers.get('Content-Type')?.split(';')[0]
-					) {
+					const contentType = response.headers['content-type']?.split(';')[0]
+
+					switch (contentType) {
 						case 'text/event-stream':
 							data = streamResponse(response)
 							break
 
 						case 'application/json':
-							data = await response.json()
+							data = response.data
 							break
+
 						case 'application/octet-stream':
-							data = await response.arrayBuffer()
+							data = response.data
 							break
 
 						case 'multipart/form-data':
-							const temp = await response.formData()
-
 							data = {}
-							temp.forEach((value, key) => {
-								// @ts-ignore
-								data[key] = value
-							})
-
+							if (response.data instanceof FormData) {
+								response.data.forEach((value, key) => {
+									// @ts-ignore
+									data[key] = value
+								})
+							}
 							break
 
 						default:
-							data = await response
-								.text()
-								.then(parseStringifiedValue)
+							data = typeof response.data === 'string' 
+								? parseStringifiedValue(response.data)
+								: response.data
 					}
 
 					if (response.status >= 300 || response.status < 200) {

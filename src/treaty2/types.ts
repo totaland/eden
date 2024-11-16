@@ -1,5 +1,6 @@
 /// <reference lib="dom" />
 import type { Elysia } from 'elysia'
+import type { AxiosInstance, AxiosRequestConfig, AxiosResponse } from 'axios'
 import { EdenWS } from './ws'
 import type { IsNever, Not, Prettify } from '../types'
 
@@ -50,7 +51,7 @@ type MaybePromise<T> = T | Promise<T>
 
 export namespace Treaty {
     interface TreatyParam {
-        fetch?: RequestInit
+        axios?: AxiosRequestConfig
     }
 
     export type Create<
@@ -164,22 +165,22 @@ export namespace Treaty {
             : never
 
     export interface Config {
-        fetch?: Omit<RequestInit, 'headers' | 'method'>
-        fetcher?: typeof fetch
+        axios?: Omit<AxiosRequestConfig, 'headers' | 'method'>
+        axiosInstance?: AxiosInstance
         headers?: MaybeArray<
-            | RequestInit['headers']
+            | AxiosRequestConfig['headers']
             | ((
                   path: string,
-                  options: RequestInit
-              ) => RequestInit['headers'] | void)
+                  options: AxiosRequestConfig
+              ) => AxiosRequestConfig['headers'] | void)
         >
         onRequest?: MaybeArray<
             (
                 path: string,
-                options: FetchRequestInit
-            ) => MaybePromise<FetchRequestInit | void>
+                options: AxiosRequestConfig
+            ) => MaybePromise<AxiosRequestConfig | void>
         >
-        onResponse?: MaybeArray<(response: Response) => MaybePromise<unknown>>
+        onResponse?: MaybeArray<(response: AxiosResponse) => MaybePromise<unknown>>
         keepDomain?: boolean
     }
 
@@ -191,9 +192,9 @@ export namespace Treaty {
         | {
               data: Res[200]
               error: null
-              response: Response
+              response: AxiosResponse
               status: number
-              headers: FetchRequestInit['headers']
+              headers: AxiosRequestConfig['headers']
           }
         | {
               data: null
@@ -208,9 +209,9 @@ export namespace Treaty {
                             value: Res[Status]
                         }
                     }[Exclude<keyof Res, 200>]
-              response: Response
+              response: AxiosResponse
               status: number
-              headers: FetchRequestInit['headers']
+              headers: AxiosRequestConfig['headers']
           }
 
     export interface OnMessage<Data = unknown> extends MessageEvent {
